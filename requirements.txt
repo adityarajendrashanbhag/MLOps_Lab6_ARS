@@ -1,0 +1,7 @@
+# Recommended Python version: 3.10
+tensorflow
+tensorflow-data-validation
+pandas
+scikit-learn
+notebook
+ipykernel
