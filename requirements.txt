@@ -1,7 +1,5 @@
-# Recommended Python version: 3.10
-tensorflow
-tensorflow-data-validation
-pandas
+mlflow
 scikit-learn
-notebook
+numpy
 ipykernel
+xgboost
