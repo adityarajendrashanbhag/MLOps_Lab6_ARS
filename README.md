@@ -8,7 +8,8 @@ The app takes telecom customer details as input and predicts whether the custome
 
 Add one screenshot of the app here before submission.
 
-![UI Screenshot](./assets/ui-screenshot-placeholder.png)
+<img width="500" height="500" alt="image" src="https://github.com/user-attachments/assets/55f8a1e5-2121-45f8-ba8a-95f1f8a16c8a" />
+
 
 ## What The App Does
 
