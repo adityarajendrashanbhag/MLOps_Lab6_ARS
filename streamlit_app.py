@@ -2,280 +2,397 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from src.data import DatasetBundle, get_demo_bundle, load_uploaded_bundle
-from src.modeling import ModelArtifacts, train_churn_model
-from src.weak_supervision import add_weak_labels, apply_weak_supervision
+from src.modeling import CLASSIFIERS, ModelResult, predict_customer, train_model
 
 
 st.set_page_config(
-    page_title="Churn Weak Supervision Lab",
-    page_icon="CL",
+    page_title="Telecom Churn Predictor",
+    page_icon="📡",
     layout="wide",
 )
 
-
-CUSTOM_CSS = """
-<style>
-    .stApp {
-        background:
-            radial-gradient(circle at top left, rgba(255, 230, 204, 0.75), transparent 30%),
-            radial-gradient(circle at top right, rgba(191, 223, 255, 0.7), transparent 28%),
-            linear-gradient(180deg, #fff9f2 0%, #f7fbff 100%);
-    }
+st.markdown(
+    """
+    <style>
+    .stApp { background: linear-gradient(135deg, #f0f4f8 0%, #e8f0f7 100%); }
     .hero {
-        padding: 1.25rem 1.5rem;
-        border-radius: 22px;
-        background: linear-gradient(135deg, rgba(255,255,255,0.92), rgba(246,250,255,0.96));
-        border: 1px solid rgba(33, 57, 88, 0.08);
-        box-shadow: 0 20px 45px rgba(52, 88, 130, 0.10);
-        margin-bottom: 1.25rem;
+        background: linear-gradient(135deg, #1a237e 0%, #1565c0 60%, #0288d1 100%);
+        color: white;
+        padding: 1.75rem 2rem;
+        border-radius: 16px;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 8px 32px rgba(26,35,126,0.18);
     }
-    .hero h1 {
-        margin: 0;
-        font-size: 2.4rem;
-        color: #17324d;
-        letter-spacing: -0.03em;
-    }
-    .hero p {
-        margin: 0.4rem 0 0 0;
-        color: #41566e;
-        font-size: 1rem;
-    }
-    .pill {
-        display: inline-block;
-        padding: 0.32rem 0.7rem;
-        border-radius: 999px;
-        background: #eaf4ff;
-        color: #1e4f7b;
-        font-size: 0.86rem;
-        margin-right: 0.45rem;
-    }
-</style>
-"""
+    .hero h1 { margin: 0; font-size: 2rem; letter-spacing: -0.02em; }
+    .hero p  { margin: 0.4rem 0 0; opacity: 0.88; font-size: 1rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ── cached helpers ────────────────────────────────────────────────────────────
+
+@st.cache_data(show_spinner=False)
+def _demo(n: int, seed: int) -> DatasetBundle:
+    return get_demo_bundle(n_rows=n, random_state=seed)
 
 
 @st.cache_data(show_spinner=False)
-def get_demo_data(n_rows: int, seed: int) -> DatasetBundle:
-    return get_demo_bundle(n_rows=n_rows, random_state=seed)
+def _upload(raw: bytes) -> DatasetBundle:
+    return load_uploaded_bundle(raw)
 
 
 @st.cache_data(show_spinner=False)
-def load_uploaded_data(raw_bytes: bytes) -> DatasetBundle:
-    return load_uploaded_bundle(raw_bytes)
+def _train(_df: pd.DataFrame, target: str, model_name: str, test_size: float) -> ModelResult:
+    return train_model(_df, target, model_name, test_size)
 
 
-@st.cache_data(show_spinner=False)
-def run_pipeline(
-    frame: pd.DataFrame, target_column: str | None, epochs: int
-) -> tuple[pd.DataFrame, object, ModelArtifacts | None]:
-    weak_artifacts = apply_weak_supervision(frame, label_model_epochs=epochs)
-    enriched = add_weak_labels(frame, weak_artifacts)
-    model_artifacts = train_churn_model(enriched, target_column=target_column)
-    return enriched, weak_artifacts, model_artifacts
+# ── sidebar ───────────────────────────────────────────────────────────────────
+
+def sidebar() -> tuple:
+    st.sidebar.title("⚙️ Controls")
+    source = st.sidebar.radio("Data source", ["Demo dataset", "Upload CSV"])
+    n_rows, seed, uploaded_bytes = 1000, 42, None
+
+    if source == "Demo dataset":
+        n_rows = st.sidebar.slider("Sample size", 300, 3000, 1000, 100)
+        seed   = st.sidebar.slider("Random seed", 1, 99, 42)
+    else:
+        f = st.sidebar.file_uploader("Upload churn CSV", type=["csv"])
+        if f:
+            uploaded_bytes = f.getvalue()
+
+    st.sidebar.divider()
+    model_name = st.sidebar.selectbox("Classifier", list(CLASSIFIERS))
+    test_pct   = st.sidebar.slider("Test split %", 10, 40, 25)
+
+    return source, n_rows, seed, uploaded_bytes, model_name, test_pct / 100
 
 
-def render_header(
-    bundle: DatasetBundle,
-    enriched: pd.DataFrame,
-    weak_artifacts: object,
-    model_artifacts: ModelArtifacts | None,
-) -> None:
-    target_text = bundle.target_column or "not detected"
+# ── Tab 1 — Data Explorer ─────────────────────────────────────────────────────
+
+def tab_explore(df: pd.DataFrame, target: str) -> None:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total customers", f"{len(df):,}")
+    c2.metric("Features", df.shape[1] - 2)
+    c3.metric("Churn rate", f"{df[target].mean():.1%}" if target in df.columns else "—")
+    c4.metric("Missing values", int(df.isnull().sum().sum()))
+
+    st.subheader("Dataset preview")
+    st.dataframe(df.head(25), use_container_width=True)
+
+    st.divider()
+    l, r = st.columns(2)
+
+    with l:
+        st.subheader("Churn rate by Contract")
+        if "contract" in df.columns and target in df.columns:
+            g = df.groupby("contract")[target].mean().reset_index(name="churn_rate")
+            fig = px.bar(
+                g, x="contract", y="churn_rate", color="contract",
+                text=g["churn_rate"].map("{:.1%}".format),
+                color_discrete_sequence=["#1565c0", "#ff5722", "#43a047"],
+            )
+            fig.update_layout(showlegend=False, height=300, yaxis_tickformat=".0%")
+            st.plotly_chart(fig, use_container_width=True)
+
+    with r:
+        st.subheader("Churn rate by Internet Service")
+        if "internet_service" in df.columns and target in df.columns:
+            g = df.groupby("internet_service")[target].mean().reset_index(name="churn_rate")
+            fig = px.bar(
+                g, x="internet_service", y="churn_rate", color="internet_service",
+                text=g["churn_rate"].map("{:.1%}".format),
+                color_discrete_sequence=["#7b1fa2", "#ff9800", "#00acc1"],
+            )
+            fig.update_layout(showlegend=False, height=300, yaxis_tickformat=".0%")
+            st.plotly_chart(fig, use_container_width=True)
+
+    l2, r2 = st.columns(2)
+
+    with l2:
+        st.subheader("Tenure distribution")
+        if "tenure" in df.columns:
+            fig = px.histogram(
+                df, x="tenure",
+                color=target if target in df.columns else None,
+                color_discrete_map={1: "#ef5350", 0: "#42a5f5"},
+                nbins=36, barmode="overlay", opacity=0.75,
+            )
+            fig.update_layout(height=300)
+            st.plotly_chart(fig, use_container_width=True)
+
+    with r2:
+        st.subheader("Monthly charges distribution")
+        if "monthly_charges" in df.columns:
+            fig = px.histogram(
+                df, x="monthly_charges",
+                color=target if target in df.columns else None,
+                color_discrete_map={1: "#ef5350", 0: "#42a5f5"},
+                nbins=36, barmode="overlay", opacity=0.75,
+            )
+            fig.update_layout(height=300)
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ── Tab 2 — Model Performance ─────────────────────────────────────────────────
+
+def tab_model(result: ModelResult) -> None:
+    st.subheader(f"Classifier: {result.model_name}")
+    st.caption(f"Trained on {result.train_rows:,} rows · evaluated on {result.test_rows:,} rows")
+
+    r1c1, r1c2 = st.columns(2)
+
+    with r1c1:
+        st.markdown("**Performance metrics**")
+        st.dataframe(result.metrics, use_container_width=True, hide_index=True)
+
+    with r1c2:
+        st.markdown("**Confusion matrix**")
+        fig = px.imshow(
+            result.confusion, text_auto=True, color_continuous_scale="Blues",
+            x=["Predicted: Retain", "Predicted: Churn"],
+            y=["Actual: Retain",    "Actual: Churn"],
+        )
+        fig.update_layout(height=280, margin=dict(l=0, r=0, t=20, b=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+    r2c1, r2c2 = st.columns(2)
+
+    with r2c1:
+        st.markdown("**ROC Curve**")
+        fig = go.Figure([
+            go.Scatter(
+                x=result.fpr, y=result.tpr, mode="lines",
+                name=f"AUC = {result.auc:.3f}",
+                line=dict(color="#1565c0", width=2.5),
+            ),
+            go.Scatter(
+                x=[0, 1], y=[0, 1], mode="lines",
+                name="Random baseline",
+                line=dict(color="gray", dash="dash"),
+            ),
+        ])
+        fig.update_layout(
+            height=320,
+            xaxis_title="False Positive Rate",
+            yaxis_title="True Positive Rate",
+            margin=dict(l=0, r=0, t=20, b=0),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with r2c2:
+        st.markdown("**Top 15 Feature Importance**")
+        fi = result.feature_importance.iloc[::-1]
+        fig = px.bar(
+            fi, x="importance", y="feature", orientation="h",
+            color="importance", color_continuous_scale="Blues",
+        )
+        fig.update_layout(
+            height=320, margin=dict(l=0, r=0, t=20, b=0),
+            coloraxis_showscale=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# ── Tab 3 — Predict Customer ──────────────────────────────────────────────────
+
+def tab_predict(result: ModelResult) -> None:
+    st.subheader("Predict churn for a single customer")
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        tenure          = st.slider("Tenure (months)", 0, 72, 12)
+        monthly_charges = st.slider("Monthly Charges ($)", 18.0, 130.0, 65.0, 0.5)
+        total_charges   = st.number_input(
+            "Total Charges ($)", value=float(monthly_charges * max(tenure, 1)), min_value=0.0
+        )
+
+    with c2:
+        contract         = st.selectbox("Contract", ["Month-to-month", "One year", "Two year"])
+        internet_service = st.selectbox("Internet Service", ["DSL", "Fiber optic", "No"])
+        payment_method   = st.selectbox(
+            "Payment Method",
+            ["Electronic check", "Mailed check", "Bank transfer", "Credit card"],
+        )
+
+    with c3:
+        senior_citizen = st.selectbox("Senior Citizen", ["No", "Yes"])
+        partner        = st.selectbox("Partner",        ["No", "Yes"])
+        dependents     = st.selectbox("Dependents",     ["No", "Yes"])
+
+    with st.expander("Additional Services"):
+        s1, s2, s3 = st.columns(3)
+        phone_service     = s1.selectbox("Phone Service",     ["Yes", "No"])
+        online_security   = s2.selectbox("Online Security",   ["No", "Yes", "No internet service"])
+        tech_support      = s3.selectbox("Tech Support",      ["No", "Yes", "No internet service"])
+        online_backup     = s1.selectbox("Online Backup",     ["No", "Yes", "No internet service"])
+        device_protection = s2.selectbox("Device Protection", ["No", "Yes", "No internet service"])
+        streaming_tv      = s3.selectbox("Streaming TV",      ["No", "Yes", "No internet service"])
+        streaming_movies  = s1.selectbox("Streaming Movies",  ["No", "Yes", "No internet service"])
+        paperless_billing = s2.selectbox("Paperless Billing", ["Yes", "No"])
+        gender            = s3.selectbox("Gender",            ["Male", "Female"])
+
+    if st.button("Predict Churn", type="primary"):
+        customer = dict(
+            gender=gender, senior_citizen=senior_citizen, partner=partner,
+            dependents=dependents, tenure=tenure, phone_service=phone_service,
+            internet_service=internet_service, online_security=online_security,
+            online_backup=online_backup, device_protection=device_protection,
+            tech_support=tech_support, streaming_tv=streaming_tv,
+            streaming_movies=streaming_movies, contract=contract,
+            paperless_billing=paperless_billing, payment_method=payment_method,
+            monthly_charges=monthly_charges, total_charges=total_charges,
+        )
+        label, prob = predict_customer(result.pipeline, customer)
+
+        res_l, res_r = st.columns([1, 2])
+        with res_l:
+            if label == 1:
+                st.error("⚠️ High churn risk")
+            else:
+                st.success("✅ Likely to stay")
+            st.metric("Churn probability", f"{prob:.1%}")
+
+        with res_r:
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=round(prob * 100, 1),
+                number={"suffix": "%"},
+                title={"text": "Churn Risk Score"},
+                gauge={
+                    "axis": {"range": [0, 100]},
+                    "bar": {"color": "#ef5350" if label == 1 else "#43a047"},
+                    "steps": [
+                        {"range": [0,  33], "color": "#e8f5e9"},
+                        {"range": [33, 66], "color": "#fff9c4"},
+                        {"range": [66, 100], "color": "#ffebee"},
+                    ],
+                    "threshold": {
+                        "line": {"color": "black", "width": 3},
+                        "thickness": 0.75, "value": 50,
+                    },
+                },
+            ))
+            fig.update_layout(height=260, margin=dict(l=20, r=20, t=40, b=20))
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ── Tab 4 — Insights ──────────────────────────────────────────────────────────
+
+def tab_insights(df: pd.DataFrame, target: str) -> None:
+    if target not in df.columns:
+        st.info("Insights require a churn target column in your dataset.")
+        return
+
+    st.subheader("Churn Rate by Segment")
+
+    segments = {
+        "contract":        "Contract Type",
+        "internet_service": "Internet Service",
+        "payment_method":  "Payment Method",
+        "senior_citizen":  "Senior Citizen",
+    }
+
+    cols = st.columns(2)
+    for idx, (col_name, label) in enumerate(segments.items()):
+        if col_name not in df.columns:
+            continue
+        g = df.groupby(col_name)[target].mean().reset_index(name="churn_rate")
+        fig = px.bar(
+            g, x=col_name, y="churn_rate", color="churn_rate",
+            color_continuous_scale=["#43a047", "#ff9800", "#ef5350"],
+            text=g["churn_rate"].map("{:.1%}".format),
+            title=label,
+        )
+        fig.update_layout(
+            height=270, showlegend=False, coloraxis_showscale=False,
+            yaxis_tickformat=".0%", margin=dict(l=0, r=0, t=40, b=0),
+        )
+        with cols[idx % 2]:
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.subheader("Key Risk Factors")
+
+    risks = []
+    if "contract" in df.columns:
+        v = df[df["contract"] == "Month-to-month"][target].mean()
+        risks.append(f"Month-to-month contracts: **{v:.1%}** churn rate")
+    if "internet_service" in df.columns:
+        v = df[df["internet_service"] == "Fiber optic"][target].mean()
+        risks.append(f"Fiber optic customers: **{v:.1%}** churn rate")
+    if "payment_method" in df.columns:
+        v = df[df["payment_method"].str.contains("Electronic", na=False)][target].mean()
+        risks.append(f"Electronic check users: **{v:.1%}** churn rate")
+    if "senior_citizen" in df.columns:
+        mask = df["senior_citizen"].isin(["Yes", 1, "1"])
+        if mask.any():
+            v = df.loc[mask, target].mean()
+            risks.append(f"Senior citizens: **{v:.1%}** churn rate")
+    if "tenure" in df.columns:
+        v = df[df["tenure"] <= 12][target].mean()
+        risks.append(f"First-year customers (tenure ≤ 12 months): **{v:.1%}** churn rate")
+
+    for r in risks:
+        st.markdown(f"- {r}")
+
+    st.divider()
+    st.subheader("Monthly Charges vs Tenure")
+    if "tenure" in df.columns and "monthly_charges" in df.columns:
+        sample = df.sample(min(len(df), 600), random_state=42)
+        fig = px.scatter(
+            sample, x="tenure", y="monthly_charges",
+            color=target if target in df.columns else None,
+            color_discrete_map={1: "#ef5350", 0: "#42a5f5"},
+            labels={"tenure": "Tenure (months)", "monthly_charges": "Monthly Charges ($)"},
+            opacity=0.6,
+        )
+        fig.update_layout(height=350)
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
     st.markdown(
-        f"""
+        """
         <div class="hero">
-            <span class="pill">Source: {bundle.source_name}</span>
-            <span class="pill">Rows: {len(bundle.frame):,}</span>
-            <span class="pill">Target: {target_text}</span>
-            <h1>Customer Churn Weak Supervision Lab</h1>
-            <p>Programmatic labeling, probabilistic churn signals, and a lightweight classifier wrapped in one Streamlit app.</p>
+            <h1>📡 Telecom Customer Churn Predictor</h1>
+            <p>Explore data · train a classifier · predict which customers are at risk of leaving</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    metric_columns = st.columns(4)
-    metric_columns[0].metric("Weak coverage", f"{weak_artifacts.coverage:.1%}")
-    metric_columns[1].metric("Conflict rate", f"{weak_artifacts.conflict_rate:.1%}")
-    metric_columns[2].metric("Overlap rate", f"{weak_artifacts.overlap_rate:.1%}")
-    metric_columns[3].metric("Avg churn score", f"{enriched['churn_probability'].mean():.2f}")
+    source, n_rows, seed, uploaded_bytes, model_name, test_size = sidebar()
 
-    if model_artifacts is not None and not model_artifacts.metrics.empty:
-        metrics_lookup = dict(zip(model_artifacts.metrics["metric"], model_artifacts.metrics["value"]))
-        model_cols = st.columns(3)
-        model_cols[0].metric("Holdout F1", f"{metrics_lookup.get('f1', 0):.3f}")
-        model_cols[1].metric("Holdout ROC AUC", f"{metrics_lookup.get('roc_auc', 0):.3f}")
-        model_cols[2].metric("Weak training rows", f"{model_artifacts.weak_training_rows:,}")
-
-
-def overview_tab(enriched: pd.DataFrame, target_column: str | None) -> None:
-    left, right = st.columns([1.1, 0.9])
-    with left:
-        st.subheader("Dataset preview")
-        st.dataframe(enriched.head(25), use_container_width=True)
-
-    with right:
-        st.subheader("Weak label distribution")
-        weak_counts = (
-            enriched["weak_label_name"].value_counts(dropna=False).rename_axis("label").reset_index(name="rows")
-        )
-        fig = px.bar(
-            weak_counts,
-            x="label",
-            y="rows",
-            color="label",
-            color_discrete_sequence=["#5b8def", "#ff7f50", "#92c353"],
-        )
-        fig.update_layout(height=360, showlegend=False, margin=dict(l=0, r=0, t=20, b=0))
-        st.plotly_chart(fig, use_container_width=True)
-
-        if target_column is not None:
-            st.subheader("Observed churn")
-            churn_rate = enriched[target_column].dropna().mean()
-            st.metric("Gold churn rate", f"{churn_rate:.1%}")
-
-
-def rules_tab(weak_artifacts: object) -> None:
-    st.subheader("Rulebook")
-    rules = pd.DataFrame(
-        [
-            ("lf_month_to_month_fiber_risk", "Flags costly month-to-month fiber plans as churn-prone."),
-            ("lf_new_customer_echeck_risk", "Flags new electronic-check customers using paperless billing."),
-            ("lf_senior_high_bill_risk", "Flags senior customers with very high monthly charges."),
-            ("lf_long_term_secure_customer", "Marks long-tenure customers with longer contracts and tech support as safe."),
-            ("lf_protection_bundle_safe", "Marks customers with security and device protection as more stable."),
-            ("lf_low_charge_no_internet_safe", "Marks low-charge customers without internet service as retain."),
-        ],
-        columns=["labeling_function", "idea"],
-    )
-    st.dataframe(rules, use_container_width=True, hide_index=True)
-
-    st.subheader("LF analysis")
-    st.dataframe(weak_artifacts.lf_summary, use_container_width=True, hide_index=True)
-
-
-def weak_labels_tab(enriched: pd.DataFrame, weak_artifacts: object) -> None:
-    st.subheader("Probabilistic labels")
-    preview_cols = [
-        column
-        for column in [
-            "customer_id",
-            "contract",
-            "internet_service",
-            "tenure",
-            "monthly_charges",
-            "payment_method",
-            "weak_label_name",
-            "churn_probability",
-        ]
-        if column in enriched.columns
-    ]
-    st.dataframe(
-        enriched.sort_values("churn_probability", ascending=False)[preview_cols].head(30),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    chart_col, matrix_col = st.columns([1.0, 1.2])
-    with chart_col:
-        fig = px.histogram(
-            enriched,
-            x="churn_probability",
-            nbins=24,
-            color="weak_label_name",
-            color_discrete_map={"Churn": "#ff7f50", "Retain": "#5b8def", "Abstain": "#92c353"},
-        )
-        fig.update_layout(height=360, margin=dict(l=0, r=0, t=20, b=0))
-        st.plotly_chart(fig, use_container_width=True)
-
-    with matrix_col:
-        label_matrix = pd.DataFrame(
-            weak_artifacts.label_matrix[:20],
-            columns=weak_artifacts.lf_summary["lf_name"].tolist(),
-        )
-        st.caption("First 20 rows of the labeling matrix")
-        st.dataframe(label_matrix, use_container_width=True)
-
-
-def model_tab(model_artifacts: ModelArtifacts | None) -> None:
-    st.subheader("Classifier")
-    if model_artifacts is None:
-        st.info(
-            "Model evaluation is available when the dataset includes a usable churn target column with enough labeled rows."
-        )
-        return
-
-    left, right = st.columns([0.85, 1.15])
-    with left:
-        st.dataframe(model_artifacts.metrics, use_container_width=True, hide_index=True)
-
-    with right:
-        fig = px.bar(
-            model_artifacts.feature_importance.iloc[::-1],
-            x="weight",
-            y="feature",
-            orientation="h",
-            color="weight",
-            color_continuous_scale=["#5b8def", "#ffb36b", "#ff7f50"],
-        )
-        fig.update_layout(height=420, margin=dict(l=0, r=0, t=20, b=0), coloraxis_showscale=False)
-        st.plotly_chart(fig, use_container_width=True)
-
-
-def slices_tab(model_artifacts: ModelArtifacts | None, enriched: pd.DataFrame) -> None:
-    st.subheader("Slice analysis")
-    if model_artifacts is None or model_artifacts.slice_metrics.empty:
-        st.info("Slice metrics appear here when the app can train and score a holdout model against a gold churn target.")
+    if source == "Upload CSV" and uploaded_bytes:
+        bundle = _upload(uploaded_bytes)
     else:
-        st.dataframe(model_artifacts.slice_metrics, use_container_width=True, hide_index=True)
+        bundle = _demo(n_rows, seed)
 
-    if "contract" in enriched.columns and "churn_probability" in enriched.columns:
-        fig = px.box(
-            enriched,
-            x="contract",
-            y="churn_probability",
-            color="contract",
-            color_discrete_sequence=["#5b8def", "#92c353", "#ff7f50"],
-        )
-        fig.update_layout(height=360, showlegend=False, margin=dict(l=0, r=0, t=20, b=0))
-        st.plotly_chart(fig, use_container_width=True)
+    df     = bundle.frame
+    target = bundle.target_column or "churn"
 
+    with st.spinner("Training model…"):
+        result = _train(df, target, model_name, test_size)
 
-def sidebar_controls() -> tuple[str, int, int, int, bytes | None]:
-    st.sidebar.header("Lab Controls")
-    data_source = st.sidebar.radio("Dataset source", ["Demo dataset", "Upload CSV"], index=0)
-    sample_size = st.sidebar.slider("Demo rows", min_value=400, max_value=3000, value=1200, step=100)
-    seed = st.sidebar.slider("Random seed", min_value=1, max_value=99, value=7)
-    epochs = st.sidebar.slider("LabelModel epochs", min_value=100, max_value=600, value=300, step=50)
-    uploaded_file = st.sidebar.file_uploader("Upload churn CSV", type=["csv"])
-    return data_source, sample_size, seed, epochs, uploaded_file.getvalue() if uploaded_file else None
-
-
-def main() -> None:
-    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-    data_source, sample_size, seed, epochs, uploaded_bytes = sidebar_controls()
-
-    if data_source == "Upload CSV" and uploaded_bytes is not None:
-        bundle = load_uploaded_data(uploaded_bytes)
-    else:
-        bundle = get_demo_data(sample_size, seed)
-
-    enriched, weak_artifacts, model_artifacts = run_pipeline(bundle.frame, bundle.target_column, epochs)
-    render_header(bundle, enriched, weak_artifacts, model_artifacts)
-
-    tabs = st.tabs(["Overview", "Rules", "Weak Labels", "Model", "Slices"])
+    tabs = st.tabs(["🔍 Data Explorer", "🤖 Model Performance", "🎯 Predict Customer", "💡 Insights"])
     with tabs[0]:
-        overview_tab(enriched, bundle.target_column)
+        tab_explore(df, target)
     with tabs[1]:
-        rules_tab(weak_artifacts)
+        tab_model(result)
     with tabs[2]:
-        weak_labels_tab(enriched, weak_artifacts)
+        tab_predict(result)
     with tabs[3]:
-        model_tab(model_artifacts)
-    with tabs[4]:
-        slices_tab(model_artifacts, enriched)
+        tab_insights(df, target)
 
 
 if __name__ == "__main__":

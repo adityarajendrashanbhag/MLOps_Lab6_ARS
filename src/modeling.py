@@ -5,152 +5,136 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
-DEFAULT_EXCLUDE = {"customer_id", "weak_label", "weak_label_name", "churn_probability"}
+CLASSIFIERS: dict[str, object] = {
+    "Logistic Regression": LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42),
+    "Random Forest": RandomForestClassifier(n_estimators=100, class_weight="balanced", random_state=42),
+    "Gradient Boosting": GradientBoostingClassifier(n_estimators=100, random_state=42),
+}
+
+_DROP = {"customer_id"}
 
 
 @dataclass
-class ModelArtifacts:
+class ModelResult:
+    model_name: str
     metrics: pd.DataFrame
     feature_importance: pd.DataFrame
-    score_frame: pd.DataFrame
-    slice_metrics: pd.DataFrame
-    weak_training_rows: int
+    confusion: np.ndarray
+    fpr: np.ndarray
+    tpr: np.ndarray
+    auc: float
+    pipeline: Pipeline
+    train_rows: int
+    test_rows: int
 
 
-def _build_preprocessor(df: pd.DataFrame) -> ColumnTransformer:
-    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    categorical_cols = [column for column in df.columns if column not in numeric_cols]
-
+def _preprocessor(num_cols: list[str], cat_cols: list[str]) -> ColumnTransformer:
     return ColumnTransformer(
         transformers=[
             (
                 "num",
-                Pipeline(
-                    steps=[
-                        ("imputer", SimpleImputer(strategy="median")),
-                        ("scaler", StandardScaler()),
-                    ]
-                ),
-                numeric_cols,
+                Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler())]),
+                num_cols,
             ),
             (
                 "cat",
-                Pipeline(
-                    steps=[
-                        ("imputer", SimpleImputer(strategy="most_frequent")),
-                        ("onehot", OneHotEncoder(handle_unknown="ignore")),
-                    ]
-                ),
-                categorical_cols,
+                Pipeline([
+                    ("imp", SimpleImputer(strategy="most_frequent")),
+                    ("enc", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+                ]),
+                cat_cols,
             ),
         ]
     )
 
 
-def _compute_metrics(y_true: pd.Series, y_pred: np.ndarray, y_score: np.ndarray) -> pd.DataFrame:
-    metrics = {
-        "accuracy": accuracy_score(y_true, y_pred),
-        "precision": precision_score(y_true, y_pred, zero_division=0),
-        "recall": recall_score(y_true, y_pred, zero_division=0),
-        "f1": f1_score(y_true, y_pred, zero_division=0),
-    }
-    if len(np.unique(y_true)) > 1:
-        metrics["roc_auc"] = roc_auc_score(y_true, y_score)
-    return pd.DataFrame(
-        {"metric": list(metrics.keys()), "value": [round(value, 4) for value in metrics.values()]}
-    )
-
-
-def _slice_metrics(df: pd.DataFrame, target_column: str) -> pd.DataFrame:
-    slice_definitions = {
-        "month_to_month": df.get("contract", pd.Series(index=df.index, dtype=object)).eq("Month-to-month"),
-        "fiber_optic": df.get("internet_service", pd.Series(index=df.index, dtype=object)).eq("Fiber optic"),
-        "senior_citizen": df.get("senior_citizen", pd.Series(index=df.index, dtype=object)).eq("Yes"),
-        "high_monthly_charges": df.get("monthly_charges", pd.Series(index=df.index, dtype=float)).fillna(0) >= 90,
-    }
-
-    rows = []
-    for slice_name, mask in slice_definitions.items():
-        subset = df.loc[mask]
-        if subset.empty or subset[target_column].nunique(dropna=True) < 2:
-            continue
-        rows.append(
-            {
-                "slice": slice_name,
-                "rows": len(subset),
-                "churn_rate": round(float(subset[target_column].mean()), 4),
-                "avg_model_score": round(float(subset["model_score"].mean()), 4),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def train_churn_model(
+def train_model(
     df: pd.DataFrame,
-    target_column: str | None,
-) -> ModelArtifacts | None:
-    if target_column is None or target_column not in df.columns:
-        return None
+    target: str,
+    model_name: str = "Logistic Regression",
+    test_size: float = 0.25,
+) -> ModelResult:
+    X = df.drop(columns=[c for c in (_DROP | {target}) if c in df.columns])
+    y = pd.to_numeric(df[target], errors="coerce").dropna().astype(int)
+    X = X.loc[y.index]
 
-    labeled = df.loc[df["weak_label"].isin([0, 1])].copy()
-    labeled = labeled.dropna(subset=[target_column])
-    if len(labeled) < 80 or labeled["weak_label"].nunique() < 2 or labeled[target_column].nunique() < 2:
-        return None
+    num_cols = X.select_dtypes(include="number").columns.tolist()
+    cat_cols = X.select_dtypes(exclude="number").columns.tolist()
 
-    feature_columns = [column for column in labeled.columns if column not in DEFAULT_EXCLUDE | {target_column}]
-    X = labeled[feature_columns]
-    y_weak = labeled["weak_label"].astype(int)
-    y_gold = labeled[target_column].astype(int)
+    pipeline = Pipeline([
+        ("prep", _preprocessor(num_cols, cat_cols)),
+        ("clf", CLASSIFIERS[model_name]),
+    ])
 
-    X_train, X_test, y_train, _, _, y_gold_test = train_test_split(
-        X,
-        y_weak,
-        y_gold,
-        test_size=0.25,
-        random_state=13,
-        stratify=y_gold,
-    )
-
-    pipeline = Pipeline(
-        [
-            ("preprocessor", _build_preprocessor(X_train)),
-            ("model", LogisticRegression(max_iter=1500, class_weight="balanced")),
-        ]
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, stratify=y, random_state=42
     )
     pipeline.fit(X_train, y_train)
 
-    scores = pipeline.predict_proba(X_test)[:, 1]
-    predictions = (scores >= 0.5).astype(int)
-    metrics = _compute_metrics(y_gold_test, predictions, scores)
+    y_pred = pipeline.predict(X_test)
+    y_prob = pipeline.predict_proba(X_test)[:, 1]
 
-    encoded_features = pipeline.named_steps["preprocessor"].get_feature_names_out()
-    coefficients = pipeline.named_steps["model"].coef_[0]
-    feature_importance = (
-        pd.DataFrame({"feature": encoded_features, "weight": coefficients})
-        .assign(abs_weight=lambda frame: frame["weight"].abs())
-        .sort_values("abs_weight", ascending=False)
-        .drop(columns="abs_weight")
-        .head(15)
+    metrics = pd.DataFrame([
+        {"Metric": "Accuracy",  "Value": round(accuracy_score(y_test, y_pred), 4)},
+        {"Metric": "Precision", "Value": round(precision_score(y_test, y_pred, zero_division=0), 4)},
+        {"Metric": "Recall",    "Value": round(recall_score(y_test, y_pred, zero_division=0), 4)},
+        {"Metric": "F1 Score",  "Value": round(f1_score(y_test, y_pred, zero_division=0), 4)},
+        {"Metric": "ROC AUC",   "Value": round(roc_auc_score(y_test, y_prob), 4)},
+    ])
+
+    prep = pipeline.named_steps["prep"]
+    cat_feature_names = prep.named_transformers_["cat"].named_steps["enc"].get_feature_names_out(cat_cols).tolist()
+    all_features = num_cols + cat_feature_names
+    clf = pipeline.named_steps["clf"]
+
+    if hasattr(clf, "coef_"):
+        importance_vals = np.abs(clf.coef_[0])
+    elif hasattr(clf, "feature_importances_"):
+        importance_vals = clf.feature_importances_
+    else:
+        importance_vals = np.zeros(len(all_features))
+
+    fi = (
+        pd.DataFrame({"feature": all_features, "importance": importance_vals})
+        .nlargest(15, "importance")
         .reset_index(drop=True)
     )
 
-    score_frame = df.copy()
-    score_frame["model_score"] = pipeline.predict_proba(df[feature_columns])[:, 1]
-    score_frame["predicted_churn"] = (score_frame["model_score"] >= 0.5).astype(int)
-    slice_metrics = _slice_metrics(score_frame.dropna(subset=[target_column]), target_column)
+    cm = confusion_matrix(y_test, y_pred)
+    fpr, tpr, _ = roc_curve(y_test, y_prob)
+    auc = roc_auc_score(y_test, y_prob)
 
-    return ModelArtifacts(
+    return ModelResult(
+        model_name=model_name,
         metrics=metrics,
-        feature_importance=feature_importance,
-        score_frame=score_frame,
-        slice_metrics=slice_metrics,
-        weak_training_rows=len(labeled),
+        feature_importance=fi,
+        confusion=cm,
+        fpr=fpr,
+        tpr=tpr,
+        auc=auc,
+        pipeline=pipeline,
+        train_rows=len(X_train),
+        test_rows=len(X_test),
     )
+
+
+def predict_customer(pipeline: Pipeline, customer: dict) -> tuple[int, float]:
+    prob = float(pipeline.predict_proba(pd.DataFrame([customer]))[0, 1])
+    return (1 if prob >= 0.5 else 0), prob
