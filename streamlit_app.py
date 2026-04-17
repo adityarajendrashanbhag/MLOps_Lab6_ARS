@@ -1,399 +1,396 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
+from sklearn.compose import ColumnTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from src.data import DatasetBundle, get_demo_bundle, load_uploaded_bundle
-from src.modeling import CLASSIFIERS, ModelResult, predict_customer, train_model
 
-
-st.set_page_config(
-    page_title="Telecom Churn Predictor",
-    page_icon="📡",
-    layout="wide",
-)
+st.set_page_config(page_title="Customer Churn Predictor", page_icon="CP", layout="centered")
 
 st.markdown(
     """
     <style>
-    .stApp { background: linear-gradient(135deg, #f0f4f8 0%, #e8f0f7 100%); }
-    .hero {
-        background: linear-gradient(135deg, #1a237e 0%, #1565c0 60%, #0288d1 100%);
-        color: white;
-        padding: 1.75rem 2rem;
-        border-radius: 16px;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 8px 32px rgba(26,35,126,0.18);
+    /* ── Page background ───────────────────────────────────────────────── */
+    .stApp {
+        background:
+            radial-gradient(circle at top left, rgba(255, 229, 204, 0.85), transparent 28%),
+            radial-gradient(circle at top right, rgba(208, 231, 255, 0.75), transparent 26%),
+            linear-gradient(180deg, #fffaf4 0%, #f8fbff 100%);
     }
-    .hero h1 { margin: 0; font-size: 2rem; letter-spacing: -0.02em; }
-    .hero p  { margin: 0.4rem 0 0; opacity: 0.88; font-size: 1rem; }
+
+    /* ── Hero card ─────────────────────────────────────────────────────── */
+    .hero {
+        padding: 1.4rem 1.6rem;
+        border-radius: 22px;
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(20, 49, 82, 0.08);
+        box-shadow: 0 18px 40px rgba(44, 86, 129, 0.10);
+        margin-bottom: 1rem;
+    }
+    .hero h1 {
+        margin: 0;
+        color: #16324a;
+        font-size: 2.2rem;
+        letter-spacing: -0.03em;
+    }
+    .hero p {
+        margin: 0.45rem 0 0 0;
+        color: #4a6076;
+        font-size: 1rem;
+    }
+
+    /* ── Info card ─────────────────────────────────────────────────────── */
+    .info-card {
+        padding: 0.9rem 1rem;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.85);
+        border: 1px solid rgba(20, 49, 82, 0.08);
+        margin-bottom: 1rem;
+        color: #29445b;
+    }
+
+    /* ── Form labels ───────────────────────────────────────────────────── */
+    label, .stSlider label, .stNumberInput label, .stSelectbox label {
+        color: #17324a !important;
+        font-weight: 600;
+    }
+
+    /* ── Selectbox — dark background, light text ───────────────────────── */
+    div[data-baseweb="select"] > div {
+        background-color: #1e2d3d !important;
+        color: #f0f4f8 !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    }
+    div[data-baseweb="select"] span {
+        color: #f0f4f8 !important;
+    }
+    div[data-baseweb="select"] input {
+        color: #f0f4f8 !important;
+        -webkit-text-fill-color: #f0f4f8 !important;
+    }
+    div[data-baseweb="select"] svg {
+        fill: #f0f4f8 !important;
+    }
+
+    /* ── Dropdown open list ─────────────────────────────────────────────── */
+    ul[data-baseweb="menu"] {
+        background-color: #1e2d3d !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    }
+    ul[data-baseweb="menu"] li {
+        background-color: #1e2d3d !important;
+        color: #f0f4f8 !important;
+    }
+    ul[data-baseweb="menu"] li:hover,
+    ul[data-baseweb="menu"] li[aria-selected="true"] {
+        background-color: #2d4a6b !important;
+        color: #ffffff !important;
+    }
+
+    /* ── Number input — dark background, light text ─────────────────────── */
+    div[data-testid="stNumberInput"] input {
+        background-color: #1e2d3d !important;
+        color: #f0f4f8 !important;
+        -webkit-text-fill-color: #f0f4f8 !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    }
+    div[data-testid="stNumberInput"] button {
+        background-color: #2d4a6b !important;
+        color: #f0f4f8 !important;
+    }
+
+    /* ── Metrics — light background, dark text ────────────────────────── */
+    [data-testid="stMetricLabel"] { color: #17324a !important; }
+    [data-testid="stMetricValue"] { color: #17324a !important; }
+    [data-testid="stMetricDelta"] { color: #17324a !important; }
+
+    /* ── Result cards (churn / stay) ───────────────────────────────────── */
+    .result-churn {
+        padding: 0.85rem 1rem;
+        border-radius: 10px;
+        background: #fde8e8;
+        border-left: 4px solid #c0392b;
+        color: #1a1a1a !important;
+        font-weight: 600;
+        font-size: 0.97rem;
+        margin-bottom: 0.6rem;
+    }
+    .result-stay {
+        padding: 0.85rem 1rem;
+        border-radius: 10px;
+        background: #e8f5e9;
+        border-left: 4px solid #2e7d32;
+        color: #1a1a1a !important;
+        font-weight: 600;
+        font-size: 0.97rem;
+        margin-bottom: 0.6rem;
+    }
+
+    /* ── st.write / st.markdown text ───────────────────────────────────── */
+    .stMarkdown p  { color: #17324a !important; }
+    .stMarkdown h3 { color: #17324a !important; }
+
+    /* ── st.table ──────────────────────────────────────────────────────── */
+    table          { color: #17324a !important; }
+    table th       { color: #17324a !important; background-color: #ddeeff !important; }
+    table td       { color: #17324a !important; background-color: #f7fbff !important; }
+
+    /* ── st.dataframe ──────────────────────────────────────────────────── */
+    [data-testid="stDataFrame"] { color: #17324a; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-# ── cached helpers ────────────────────────────────────────────────────────────
-
-@st.cache_data(show_spinner=False)
-def _demo(n: int, seed: int) -> DatasetBundle:
-    return get_demo_bundle(n_rows=n, random_state=seed)
-
-
-@st.cache_data(show_spinner=False)
-def _upload(raw: bytes) -> DatasetBundle:
-    return load_uploaded_bundle(raw)
-
-
-@st.cache_data(show_spinner=False)
-def _train(_df: pd.DataFrame, target: str, model_name: str, test_size: float) -> ModelResult:
-    return train_model(_df, target, model_name, test_size)
-
-
-# ── sidebar ───────────────────────────────────────────────────────────────────
-
-def sidebar() -> tuple:
-    st.sidebar.title("⚙️ Controls")
-    source = st.sidebar.radio("Data source", ["Demo dataset", "Upload CSV"])
-    n_rows, seed, uploaded_bytes = 1000, 42, None
-
-    if source == "Demo dataset":
-        n_rows = st.sidebar.slider("Sample size", 300, 3000, 1000, 100)
-        seed   = st.sidebar.slider("Random seed", 1, 99, 42)
-    else:
-        f = st.sidebar.file_uploader("Upload churn CSV", type=["csv"])
-        if f:
-            uploaded_bytes = f.getvalue()
-
-    st.sidebar.divider()
-    model_name = st.sidebar.selectbox("Classifier", list(CLASSIFIERS))
-    test_pct   = st.sidebar.slider("Test split %", 10, 40, 25)
-
-    return source, n_rows, seed, uploaded_bytes, model_name, test_pct / 100
+FEATURE_COLUMNS = [
+    "tenure",
+    "monthly_charges",
+    "total_charges",
+    "contract",
+    "internet_service",
+    "payment_method",
+    "paperless_billing",
+    "senior_citizen",
+    "partner",
+    "dependents",
+    "online_security",
+    "tech_support",
+]
 
 
-# ── Tab 1 — Data Explorer ─────────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def train_demo_model() -> Pipeline:
+    rng = np.random.default_rng(21)
+    n_rows = 2500
 
-def tab_explore(df: pd.DataFrame, target: str) -> None:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total customers", f"{len(df):,}")
-    c2.metric("Features", df.shape[1] - 2)
-    c3.metric("Churn rate", f"{df[target].mean():.1%}" if target in df.columns else "—")
-    c4.metric("Missing values", int(df.isnull().sum().sum()))
+    contract = rng.choice(["Month-to-month", "One year", "Two year"], size=n_rows, p=[0.56, 0.23, 0.21])
+    internet_service = rng.choice(["DSL", "Fiber optic", "No"], size=n_rows, p=[0.33, 0.49, 0.18])
+    payment_method = rng.choice(
+        ["Electronic check", "Mailed check", "Bank transfer", "Credit card"],
+        size=n_rows,
+        p=[0.35, 0.2, 0.23, 0.22],
+    )
+    paperless_billing = rng.choice(["Yes", "No"], size=n_rows, p=[0.65, 0.35])
+    senior_citizen = rng.choice(["Yes", "No"], size=n_rows, p=[0.16, 0.84])
+    partner = rng.choice(["Yes", "No"], size=n_rows, p=[0.54, 0.46])
+    dependents = rng.choice(["Yes", "No"], size=n_rows, p=[0.29, 0.71])
 
-    st.subheader("Dataset preview")
-    st.dataframe(df.head(25), use_container_width=True)
+    tenure = np.select(
+        [contract == "Month-to-month", contract == "One year", contract == "Two year"],
+        [
+            rng.integers(1, 28, size=n_rows),
+            rng.integers(8, 48, size=n_rows),
+            rng.integers(18, 73, size=n_rows),
+        ],
+    ).astype(int)
 
-    st.divider()
-    l, r = st.columns(2)
+    base_charge = np.select(
+        [internet_service == "Fiber optic", internet_service == "DSL", internet_service == "No"],
+        [82, 58, 25],
+    ).astype(float)
+    monthly_charges = (
+        base_charge
+        + (paperless_billing == "Yes") * rng.uniform(2, 7, size=n_rows)
+        + (senior_citizen == "Yes") * rng.uniform(1, 8, size=n_rows)
+        + rng.normal(0, 8, size=n_rows)
+    ).clip(18, 130)
 
-    with l:
-        st.subheader("Churn rate by Contract")
-        if "contract" in df.columns and target in df.columns:
-            g = df.groupby("contract")[target].mean().reset_index(name="churn_rate")
-            fig = px.bar(
-                g, x="contract", y="churn_rate", color="contract",
-                text=g["churn_rate"].map("{:.1%}".format),
-                color_discrete_sequence=["#1565c0", "#ff5722", "#43a047"],
-            )
-            fig.update_layout(showlegend=False, height=300, yaxis_tickformat=".0%")
-            st.plotly_chart(fig, use_container_width=True)
+    online_security = np.where(
+        internet_service == "No",
+        "No internet service",
+        rng.choice(["Yes", "No"], size=n_rows, p=[0.35, 0.65]),
+    )
+    tech_support = np.where(
+        internet_service == "No",
+        "No internet service",
+        rng.choice(["Yes", "No"], size=n_rows, p=[0.3, 0.7]),
+    )
 
-    with r:
-        st.subheader("Churn rate by Internet Service")
-        if "internet_service" in df.columns and target in df.columns:
-            g = df.groupby("internet_service")[target].mean().reset_index(name="churn_rate")
-            fig = px.bar(
-                g, x="internet_service", y="churn_rate", color="internet_service",
-                text=g["churn_rate"].map("{:.1%}".format),
-                color_discrete_sequence=["#7b1fa2", "#ff9800", "#00acc1"],
-            )
-            fig.update_layout(showlegend=False, height=300, yaxis_tickformat=".0%")
-            st.plotly_chart(fig, use_container_width=True)
+    total_charges = (monthly_charges * tenure + rng.normal(0, 45, size=n_rows)).clip(20, None)
 
-    l2, r2 = st.columns(2)
+    churn_logit = (
+        -1.25
+        + 1.15 * (contract == "Month-to-month")
+        + 0.75 * (internet_service == "Fiber optic")
+        + 0.72 * (payment_method == "Electronic check")
+        + 0.38 * (paperless_billing == "Yes")
+        + 0.35 * (senior_citizen == "Yes")
+        - 0.022 * tenure
+        + 0.018 * (monthly_charges - 70)
+        - 0.6 * (online_security == "Yes")
+        - 0.52 * (tech_support == "Yes")
+        - 0.3 * (partner == "Yes")
+        - 0.2 * (dependents == "Yes")
+    )
+    churn_probability = 1 / (1 + np.exp(-churn_logit))
+    churn = rng.binomial(1, churn_probability)
 
-    with l2:
-        st.subheader("Tenure distribution")
-        if "tenure" in df.columns:
-            fig = px.histogram(
-                df, x="tenure",
-                color=target if target in df.columns else None,
-                color_discrete_map={1: "#ef5350", 0: "#42a5f5"},
-                nbins=36, barmode="overlay", opacity=0.75,
-            )
-            fig.update_layout(height=300)
-            st.plotly_chart(fig, use_container_width=True)
+    train_df = pd.DataFrame(
+        {
+            "tenure": tenure,
+            "monthly_charges": monthly_charges.round(2),
+            "total_charges": total_charges.round(2),
+            "contract": contract,
+            "internet_service": internet_service,
+            "payment_method": payment_method,
+            "paperless_billing": paperless_billing,
+            "senior_citizen": senior_citizen,
+            "partner": partner,
+            "dependents": dependents,
+            "online_security": online_security,
+            "tech_support": tech_support,
+            "churn": churn,
+        }
+    )
 
-    with r2:
-        st.subheader("Monthly charges distribution")
-        if "monthly_charges" in df.columns:
-            fig = px.histogram(
-                df, x="monthly_charges",
-                color=target if target in df.columns else None,
-                color_discrete_map={1: "#ef5350", 0: "#42a5f5"},
-                nbins=36, barmode="overlay", opacity=0.75,
-            )
-            fig.update_layout(height=300)
-            st.plotly_chart(fig, use_container_width=True)
+    numeric_features = ["tenure", "monthly_charges", "total_charges"]
+    categorical_features = [column for column in FEATURE_COLUMNS if column not in numeric_features]
 
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", StandardScaler(), numeric_features),
+            ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features),
+        ]
+    )
 
-# ── Tab 2 — Model Performance ─────────────────────────────────────────────────
-
-def tab_model(result: ModelResult) -> None:
-    st.subheader(f"Classifier: {result.model_name}")
-    st.caption(f"Trained on {result.train_rows:,} rows · evaluated on {result.test_rows:,} rows")
-
-    r1c1, r1c2 = st.columns(2)
-
-    with r1c1:
-        st.markdown("**Performance metrics**")
-        st.dataframe(result.metrics, use_container_width=True, hide_index=True)
-
-    with r1c2:
-        st.markdown("**Confusion matrix**")
-        fig = px.imshow(
-            result.confusion, text_auto=True, color_continuous_scale="Blues",
-            x=["Predicted: Retain", "Predicted: Churn"],
-            y=["Actual: Retain",    "Actual: Churn"],
-        )
-        fig.update_layout(height=280, margin=dict(l=0, r=0, t=20, b=0))
-        st.plotly_chart(fig, use_container_width=True)
-
-    r2c1, r2c2 = st.columns(2)
-
-    with r2c1:
-        st.markdown("**ROC Curve**")
-        fig = go.Figure([
-            go.Scatter(
-                x=result.fpr, y=result.tpr, mode="lines",
-                name=f"AUC = {result.auc:.3f}",
-                line=dict(color="#1565c0", width=2.5),
-            ),
-            go.Scatter(
-                x=[0, 1], y=[0, 1], mode="lines",
-                name="Random baseline",
-                line=dict(color="gray", dash="dash"),
-            ),
-        ])
-        fig.update_layout(
-            height=320,
-            xaxis_title="False Positive Rate",
-            yaxis_title="True Positive Rate",
-            margin=dict(l=0, r=0, t=20, b=0),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    with r2c2:
-        st.markdown("**Top 15 Feature Importance**")
-        fi = result.feature_importance.iloc[::-1]
-        fig = px.bar(
-            fi, x="importance", y="feature", orientation="h",
-            color="importance", color_continuous_scale="Blues",
-        )
-        fig.update_layout(
-            height=320, margin=dict(l=0, r=0, t=20, b=0),
-            coloraxis_showscale=False,
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    model = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("classifier", LogisticRegression(max_iter=2000)),
+        ]
+    )
+    model.fit(train_df[FEATURE_COLUMNS], train_df["churn"])
+    return model
 
 
-# ── Tab 3 — Predict Customer ──────────────────────────────────────────────────
+def build_customer_frame(
+    tenure: int,
+    monthly_charges: float,
+    total_charges: float,
+    contract: str,
+    internet_service: str,
+    payment_method: str,
+    paperless_billing: str,
+    senior_citizen: str,
+    partner: str,
+    dependents: str,
+    online_security: str,
+    tech_support: str,
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "tenure": tenure,
+                "monthly_charges": monthly_charges,
+                "total_charges": total_charges,
+                "contract": contract,
+                "internet_service": internet_service,
+                "payment_method": payment_method,
+                "paperless_billing": paperless_billing,
+                "senior_citizen": senior_citizen,
+                "partner": partner,
+                "dependents": dependents,
+                "online_security": online_security,
+                "tech_support": tech_support,
+            }
+        ]
+    )
 
-def tab_predict(result: ModelResult) -> None:
-    st.subheader("Predict churn for a single customer")
 
-    c1, c2, c3 = st.columns(3)
+model = train_demo_model()
 
-    with c1:
-        tenure          = st.slider("Tenure (months)", 0, 72, 12)
-        monthly_charges = st.slider("Monthly Charges ($)", 18.0, 130.0, 65.0, 0.5)
-        total_charges   = st.number_input(
-            "Total Charges ($)", value=float(monthly_charges * max(tenure, 1)), min_value=0.0
-        )
+st.markdown(
+    """
+    <div class="hero">
+        <h1>Customer Churn Predictor</h1>
+        <p>Enter telecom customer details and predict churn with one click.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-    with c2:
-        contract         = st.selectbox("Contract", ["Month-to-month", "One year", "Two year"])
+st.markdown(
+    """
+    <div class="info-card">
+        This is a simple Streamlit lab app. It uses a lightweight logistic regression model trained on synthetic
+        telecom churn data so you can focus on the user interface and prediction workflow.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+with st.form("churn_form"):
+    col1, col2 = st.columns(2)
+
+    with col1:
+        tenure = st.slider("Tenure (months)", min_value=0, max_value=72, value=12)
+        monthly_charges = st.slider("Monthly Charges ($)", min_value=18.0, max_value=130.0, value=70.0, step=0.5)
+        contract = st.selectbox("Contract Type", ["Month-to-month", "One year", "Two year"])
         internet_service = st.selectbox("Internet Service", ["DSL", "Fiber optic", "No"])
-        payment_method   = st.selectbox(
+        payment_method = st.selectbox(
             "Payment Method",
             ["Electronic check", "Mailed check", "Bank transfer", "Credit card"],
         )
+        paperless_billing = st.selectbox("Paperless Billing", ["Yes", "No"])
 
-    with c3:
+    with col2:
         senior_citizen = st.selectbox("Senior Citizen", ["No", "Yes"])
-        partner        = st.selectbox("Partner",        ["No", "Yes"])
-        dependents     = st.selectbox("Dependents",     ["No", "Yes"])
-
-    with st.expander("Additional Services"):
-        s1, s2, s3 = st.columns(3)
-        phone_service     = s1.selectbox("Phone Service",     ["Yes", "No"])
-        online_security   = s2.selectbox("Online Security",   ["No", "Yes", "No internet service"])
-        tech_support      = s3.selectbox("Tech Support",      ["No", "Yes", "No internet service"])
-        online_backup     = s1.selectbox("Online Backup",     ["No", "Yes", "No internet service"])
-        device_protection = s2.selectbox("Device Protection", ["No", "Yes", "No internet service"])
-        streaming_tv      = s3.selectbox("Streaming TV",      ["No", "Yes", "No internet service"])
-        streaming_movies  = s1.selectbox("Streaming Movies",  ["No", "Yes", "No internet service"])
-        paperless_billing = s2.selectbox("Paperless Billing", ["Yes", "No"])
-        gender            = s3.selectbox("Gender",            ["Male", "Female"])
-
-    if st.button("Predict Churn", type="primary"):
-        customer = dict(
-            gender=gender, senior_citizen=senior_citizen, partner=partner,
-            dependents=dependents, tenure=tenure, phone_service=phone_service,
-            internet_service=internet_service, online_security=online_security,
-            online_backup=online_backup, device_protection=device_protection,
-            tech_support=tech_support, streaming_tv=streaming_tv,
-            streaming_movies=streaming_movies, contract=contract,
-            paperless_billing=paperless_billing, payment_method=payment_method,
-            monthly_charges=monthly_charges, total_charges=total_charges,
+        partner = st.selectbox("Partner", ["No", "Yes"])
+        dependents = st.selectbox("Dependents", ["No", "Yes"])
+        online_security = st.selectbox("Online Security", ["No", "Yes", "No internet service"])
+        tech_support = st.selectbox("Tech Support", ["No", "Yes", "No internet service"])
+        total_charges = st.number_input(
+            "Total Charges ($)",
+            min_value=0.0,
+            value=float(max(tenure, 1) * monthly_charges),
+            step=10.0,
         )
-        label, prob = predict_customer(result.pipeline, customer)
 
-        res_l, res_r = st.columns([1, 2])
-        with res_l:
-            if label == 1:
-                st.error("⚠️ High churn risk")
-            else:
-                st.success("✅ Likely to stay")
-            st.metric("Churn probability", f"{prob:.1%}")
+    predict = st.form_submit_button("Predict Churn", type="primary", use_container_width=True)
 
-        with res_r:
-            fig = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=round(prob * 100, 1),
-                number={"suffix": "%"},
-                title={"text": "Churn Risk Score"},
-                gauge={
-                    "axis": {"range": [0, 100]},
-                    "bar": {"color": "#ef5350" if label == 1 else "#43a047"},
-                    "steps": [
-                        {"range": [0,  33], "color": "#e8f5e9"},
-                        {"range": [33, 66], "color": "#fff9c4"},
-                        {"range": [66, 100], "color": "#ffebee"},
-                    ],
-                    "threshold": {
-                        "line": {"color": "black", "width": 3},
-                        "thickness": 0.75, "value": 50,
-                    },
-                },
-            ))
-            fig.update_layout(height=260, margin=dict(l=20, r=20, t=40, b=20))
-            st.plotly_chart(fig, use_container_width=True)
-
-
-# ── Tab 4 — Insights ──────────────────────────────────────────────────────────
-
-def tab_insights(df: pd.DataFrame, target: str) -> None:
-    if target not in df.columns:
-        st.info("Insights require a churn target column in your dataset.")
-        return
-
-    st.subheader("Churn Rate by Segment")
-
-    segments = {
-        "contract":        "Contract Type",
-        "internet_service": "Internet Service",
-        "payment_method":  "Payment Method",
-        "senior_citizen":  "Senior Citizen",
-    }
-
-    cols = st.columns(2)
-    for idx, (col_name, label) in enumerate(segments.items()):
-        if col_name not in df.columns:
-            continue
-        g = df.groupby(col_name)[target].mean().reset_index(name="churn_rate")
-        fig = px.bar(
-            g, x=col_name, y="churn_rate", color="churn_rate",
-            color_continuous_scale=["#43a047", "#ff9800", "#ef5350"],
-            text=g["churn_rate"].map("{:.1%}".format),
-            title=label,
-        )
-        fig.update_layout(
-            height=270, showlegend=False, coloraxis_showscale=False,
-            yaxis_tickformat=".0%", margin=dict(l=0, r=0, t=40, b=0),
-        )
-        with cols[idx % 2]:
-            st.plotly_chart(fig, use_container_width=True)
-
-    st.divider()
-    st.subheader("Key Risk Factors")
-
-    risks = []
-    if "contract" in df.columns:
-        v = df[df["contract"] == "Month-to-month"][target].mean()
-        risks.append(f"Month-to-month contracts: **{v:.1%}** churn rate")
-    if "internet_service" in df.columns:
-        v = df[df["internet_service"] == "Fiber optic"][target].mean()
-        risks.append(f"Fiber optic customers: **{v:.1%}** churn rate")
-    if "payment_method" in df.columns:
-        v = df[df["payment_method"].str.contains("Electronic", na=False)][target].mean()
-        risks.append(f"Electronic check users: **{v:.1%}** churn rate")
-    if "senior_citizen" in df.columns:
-        mask = df["senior_citizen"].isin(["Yes", 1, "1"])
-        if mask.any():
-            v = df.loc[mask, target].mean()
-            risks.append(f"Senior citizens: **{v:.1%}** churn rate")
-    if "tenure" in df.columns:
-        v = df[df["tenure"] <= 12][target].mean()
-        risks.append(f"First-year customers (tenure ≤ 12 months): **{v:.1%}** churn rate")
-
-    for r in risks:
-        st.markdown(f"- {r}")
-
-    st.divider()
-    st.subheader("Monthly Charges vs Tenure")
-    if "tenure" in df.columns and "monthly_charges" in df.columns:
-        sample = df.sample(min(len(df), 600), random_state=42)
-        fig = px.scatter(
-            sample, x="tenure", y="monthly_charges",
-            color=target if target in df.columns else None,
-            color_discrete_map={1: "#ef5350", 0: "#42a5f5"},
-            labels={"tenure": "Tenure (months)", "monthly_charges": "Monthly Charges ($)"},
-            opacity=0.6,
-        )
-        fig.update_layout(height=350)
-        st.plotly_chart(fig, use_container_width=True)
-
-
-# ── main ──────────────────────────────────────────────────────────────────────
-
-def main() -> None:
-    st.markdown(
-        """
-        <div class="hero">
-            <h1>📡 Telecom Customer Churn Predictor</h1>
-            <p>Explore data · train a classifier · predict which customers are at risk of leaving</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+if predict:
+    customer_df = build_customer_frame(
+        tenure=tenure,
+        monthly_charges=monthly_charges,
+        total_charges=total_charges,
+        contract=contract,
+        internet_service=internet_service,
+        payment_method=payment_method,
+        paperless_billing=paperless_billing,
+        senior_citizen=senior_citizen,
+        partner=partner,
+        dependents=dependents,
+        online_security=online_security,
+        tech_support=tech_support,
     )
 
-    source, n_rows, seed, uploaded_bytes, model_name, test_size = sidebar()
+    churn_probability = float(model.predict_proba(customer_df)[0, 1])
+    prediction = int(churn_probability >= 0.5)
 
-    if source == "Upload CSV" and uploaded_bytes:
-        bundle = _upload(uploaded_bytes)
-    else:
-        bundle = _demo(n_rows, seed)
+    left, right = st.columns([1, 1])
+    with left:
+        if prediction == 1:
+            st.markdown(
+                '<div class="result-churn">⚠️ Prediction: Customer is likely to churn</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="result-stay">✅ Prediction: Customer is likely to stay</div>',
+                unsafe_allow_html=True,
+            )
+        st.metric("Churn Probability", f"{churn_probability:.1%}")
 
-    df     = bundle.frame
-    target = bundle.target_column or "churn"
-
-    with st.spinner("Training model…"):
-        result = _train(df, target, model_name, test_size)
-
-    tabs = st.tabs(["🔍 Data Explorer", "🤖 Model Performance", "🎯 Predict Customer", "💡 Insights"])
-    with tabs[0]:
-        tab_explore(df, target)
-    with tabs[1]:
-        tab_model(result)
-    with tabs[2]:
-        tab_predict(result)
-    with tabs[3]:
-        tab_insights(df, target)
-
-
-if __name__ == "__main__":
-    main()
+    with right:
+        risk_band = "High" if churn_probability >= 0.7 else "Medium" if churn_probability >= 0.4 else "Low"
+        st.metric("Risk Band", risk_band)
+        st.markdown("**Submitted customer details**")
+        summary_df = customer_df.T.reset_index()
+        summary_df.columns = ["Feature", "Value"]
+        summary_df["Value"] = summary_df["Value"].astype(str)
+        st.table(summary_df)
